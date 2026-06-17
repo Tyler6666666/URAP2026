@@ -408,6 +408,22 @@ Held-out seg05 seed-admission refresh:
 - seg01-05 smoke result: best threshold `0.50`, `tp=6`, `fp=34`, `fn=0`, `tn=4`, precision `0.150`, recall `1.000`, F1 `0.261`.
 - interpretation: seg05 adds useful positive examples and improves the smoke metric, but false positives remain too high. Continue mining additional true REACQUIRE positives and hard negatives before promoting any learned admission model.
 
+Train-pool seed-admission refresh:
+
+- no seg06 exists under `D:\datasets\my_video\validation_segments\dji_fly_20260522_113924_5x20s`; the directly labeled validation set currently has seg01-seg05 only.
+- fixed `export-yolo-labels-gt-csv` numeric frame parsing so frame files such as `000123.jpg` export as `frame_id=123` under the sequence parent rather than all becoming frame `0` under `frames`.
+- `121932` train-pool GT export: `runs\e164_selector_probe\seed_admission_datasets\121932_train_pool_gt_boxes.csv`, `983` labeled frames.
+- `121932` selector output: `runs\e164_selector_probe\seed_admission_audit_sources\121932_train_pool_probation48`
+- `121932` seed-admission CSV: `runs\e164_selector_probe\seed_admission_datasets\121932_train_pool_probation48_seed_admission.csv`, `11` rows, `3` positive, `8` negative.
+- `122540` train-pool GT export: `runs\e164_selector_probe\seed_admission_datasets\122540_train_pool_gt_boxes.csv`, `1029` labeled frames.
+- `122540` selector output: `runs\e164_selector_probe\seed_admission_audit_sources\122540_train_pool_probation48`
+- `122540` seed-admission CSV: `runs\e164_selector_probe\seed_admission_datasets\122540_train_pool_probation48_seed_admission.csv`, `40` rows, `37` positive, `3` negative.
+- merged train-pool CSV: `runs\e164_selector_probe\seed_admission_datasets\seg01_05_plus_trainpool_probation48_seed_admission.csv`
+- merged train-pool summary: `95` total rows, `46` positive, `49` negative, `0` ignored.
+- train-pool local smoke output: `runs\e164_selector_probe\seed_admission_smoke\local_seg01_05_plus_trainpool_probation48`
+- train-pool smoke result: best threshold `0.50`, `tp=31`, `fp=15`, `fn=15`, `tn=34`, precision `0.674`, recall `0.674`, F1 `0.674`.
+- interpretation: train-pool mining makes the smoke classifier meaningfully separable for the first time. This still should not be promoted as a default guard until evaluated on held-out validation segments and until frozen held-out clips, especially DJI `121806`, remain excluded from train/calibration.
+
 ## Candidate Repeated-Small-Global Guard
 
 Implementation:

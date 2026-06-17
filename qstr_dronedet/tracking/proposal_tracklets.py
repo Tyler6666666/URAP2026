@@ -99,6 +99,9 @@ def _bbox(row: dict[str, Any]) -> tuple[float, float, float, float]:
 
 def _safe_seq_frame_from_image(path: Path) -> tuple[str, int]:
     stem = path.stem
+    if stem.isdigit():
+        seq_path = path.parent.parent if path.parent.name.lower() in {"frames", "images", "images2"} else path.parent
+        return seq_path.name, int(stem)
     if "_" in stem:
         prefix, suffix = stem.rsplit("_", 1)
         if suffix.isdigit():

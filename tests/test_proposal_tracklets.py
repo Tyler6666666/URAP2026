@@ -327,6 +327,25 @@ def test_export_yolo_predictions_to_route_b_run_and_gt_csv(tmp_path):
     assert diag_rows[0]["bbox"] == [45.0, 20.0, 55.0, 30.0]
 
 
+def test_export_yolo_labels_gt_csv_parses_numeric_frame_stems(tmp_path):
+    seq = tmp_path / "dji_train_pool_seq"
+    frames = seq / "frames"
+    labels = seq / "labels"
+    frames.mkdir(parents=True)
+    labels.mkdir()
+    image = frames / "000123.jpg"
+    image.write_bytes(b"fake")
+    (labels / "000123.txt").write_text("0 0.500000 0.500000 0.100000 0.200000\n", encoding="utf-8")
+    list_file = tmp_path / "images.txt"
+    list_file.write_text(str(image) + "\n", encoding="utf-8")
+
+    gt = export_yolo_labels_to_gt_csv([list_file], tmp_path / "gt.csv", image_size=(100, 50))
+
+    rows = list(csv.DictReader(gt.out_path.open("r", encoding="utf-8")))
+    assert rows[0]["video_path"] == str(Path("dji_train_pool_seq") / "visible.mp4")
+    assert rows[0]["frame_id"] == "123"
+
+
 def test_export_temporal_saliency_tracklets_from_moving_tiny_blob(tmp_path):
     dataset = tmp_path / "dataset"
     images = dataset / "images"
