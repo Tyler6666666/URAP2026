@@ -383,6 +383,19 @@ Default probation48 labeled export:
 - merged summary: `42` total rows, `4` positive, `38` negative, `0` ignored.
 - training caution: positives currently come only from seg04 under sparse GT interpolation. Before training a default admission head, add more true-reacquire positives or manually review ambiguous negatives to avoid a segment-specific classifier.
 
+Seed-admission classifier smoke:
+
+- implementation: `qstr_dronedet.tracking.seed_admission_classifier`
+- Modal/local wrapper: `tools\modal_seed_admission_train.py`
+- local smoke command: `python tools\modal_seed_admission_train.py --dataset runs\e164_selector_probe\seed_admission_datasets\seg01_04_probation48_seed_admission.csv --out runs\e164_selector_probe\seed_admission_smoke\local_seg01_04_probation48 --epochs 5 --hidden 16 --thresholds 0.25 0.5 0.75 --smoke`
+- local smoke outputs:
+  - weights: `runs\e164_selector_probe\seed_admission_smoke\local_seg01_04_probation48\seed_admission_classifier.pt`
+  - metrics: `runs\e164_selector_probe\seed_admission_smoke\local_seg01_04_probation48\metrics.json`
+  - threshold sweep: `runs\e164_selector_probe\seed_admission_smoke\local_seg01_04_probation48\threshold_sweep.csv`
+- local smoke result on the current imbalanced dataset: best threshold `0.25`, `tp=4`, `fp=38`, `fn=0`, `tn=0`, precision `0.095`, recall `1.000`, F1 `0.174`.
+- interpretation: the trainer I/O works, but the dataset is not ready for a deployable admission model. The next data step is still to add more positive REACQUIRE segments and audit ambiguous negatives.
+- Modal entrypoint check: `modal run tools\modal_seed_admission_train.py --help` lists `--dataset`, `--out`, `--epochs`, `--lr`, `--hidden`, `--thresholds`, and `--smoke`.
+
 ## Candidate Repeated-Small-Global Guard
 
 Implementation:
