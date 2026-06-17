@@ -46,6 +46,7 @@ from .action_prior_fusion import (
     sweep_action_frame_prior_fusion,
     sweep_action_frame_prior_fusion_run_root,
 )
+from .offline_selector import OfflineSelectorResult, replay_offline_selector
 from .proposal_tracklets import (
     FlatPredictionEvaluationResult,
     FlatPredictionEvalComparisonResult,
@@ -147,6 +148,8 @@ __all__ = [
     "fuse_action_frame_prior_predictions",
     "sweep_action_frame_prior_fusion",
     "sweep_action_frame_prior_fusion_run_root",
+    "OfflineSelectorResult",
+    "replay_offline_selector",
     "FlatPredictionEvaluationResult",
     "FlatPredictionEvalComparisonResult",
     "FlatPredictionNmsSweepResult",

@@ -98,6 +98,7 @@ from qstr_dronedet.tracking.action_prior_fusion import (
     sweep_action_frame_prior_fusion,
     sweep_action_frame_prior_fusion_run_root,
 )
+from qstr_dronedet.tracking.offline_selector import replay_offline_selector
 from qstr_dronedet.tracking.proposal_tracklets import (
     build_proposal_tracklet_dataset,
     compare_flat_prediction_eval_summaries,
@@ -720,6 +721,65 @@ def cmd_infer(args: argparse.Namespace) -> None:
         selective_max_promoted_tracklets_per_sequence=args.tracklet_selective_max_promoted_tracklets_per_sequence,
     )
         print(json.dumps(summary, indent=2))
+
+
+def cmd_offline_selector_replay(args: argparse.Namespace) -> None:
+    result = replay_offline_selector(
+        args.predictions,
+        args.out,
+        top_k=args.top_k,
+        max_frame_id=args.max_frame_id,
+        max_jump_px=args.max_jump_px,
+        max_recover_frames=args.max_recover_frames,
+        min_accept_score=args.min_accept_score,
+        min_motion_consistency=args.min_motion_consistency,
+        min_memory_consistency=args.min_memory_consistency,
+        min_topk_margin=args.min_topk_margin,
+        detector_weight=args.detector_weight,
+        motion_weight=args.motion_weight,
+        memory_weight=args.memory_weight,
+        reacquire_top_k=args.reacquire_top_k,
+        reacquire_max_distance_px=args.reacquire_max_distance_px,
+        reacquire_min_detector_score=args.reacquire_min_detector_score,
+        reacquire_min_motion_consistency=args.reacquire_min_motion_consistency,
+        reacquire_min_memory_consistency=args.reacquire_min_memory_consistency,
+        reacquire_min_side_ratio=args.reacquire_min_side_ratio,
+        reacquire_max_side_ratio=args.reacquire_max_side_ratio,
+        reacquire_confirm_frames=args.reacquire_confirm_frames,
+        reacquire_stale_after_frames=args.reacquire_stale_after_frames,
+        reacquire_global_min_area=args.reacquire_global_min_area,
+        reacquire_global_small_min_area=args.reacquire_global_small_min_area,
+        reacquire_global_small_max_distance_px=args.reacquire_global_small_max_distance_px,
+        reacquire_global_small_memory_probation_frames=args.reacquire_global_small_memory_probation_frames,
+        reacquire_global_max_area=args.reacquire_global_max_area,
+        reacquire_global_min_detector_score=args.reacquire_global_min_detector_score,
+        reacquire_global_require_tracklet_confirmation=args.reacquire_global_require_tracklet_confirmation,
+        reacquire_global_reject_tracklet_rejected=args.reacquire_global_reject_tracklet_rejected,
+        reacquire_global_min_tracklet_score=args.reacquire_global_min_tracklet_score,
+        reacquire_global_delayed_confirm_frames=args.reacquire_global_delayed_confirm_frames,
+        reacquire_min_appearance_similarity=args.reacquire_min_appearance_similarity,
+        reacquire_appearance_weight=args.reacquire_appearance_weight,
+        reacquire_crop_score_field=args.reacquire_crop_score_field,
+        reacquire_crop_weight=args.reacquire_crop_weight,
+        reacquire_min_crop_drone_score=args.reacquire_min_crop_drone_score,
+        reacquire_crop_weights=args.reacquire_crop_weights,
+        reacquire_crop_image_size=args.reacquire_crop_image_size,
+        appearance_memory_size=args.appearance_memory_size,
+        video=args.video,
+        save_video=args.save_video,
+    )
+    print(
+        json.dumps(
+            {
+                "trajectory_csv": str(result.trajectory_csv),
+                "debug_csv": str(result.debug_csv),
+                "summary_json": str(result.summary_json),
+                "annotated_video": str(result.annotated_video) if result.annotated_video else None,
+                **result.summary,
+            },
+            indent=2,
+        )
+    )
 
 
 def _load_fusion_calibration(path: str | None) -> dict[str, float] | None:
@@ -3111,6 +3171,51 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed-track-score", type=float, default=0.8)
     p.add_argument("--save-video", action="store_true")
     p.set_defaults(func=cmd_infer)
+
+    p = sub.add_parser("offline-selector-replay")
+    p.add_argument("--predictions", required=True, help="Candidate-level predictions.jsonl produced by infer")
+    p.add_argument("--out", required=True, help="Output directory for trajectory.csv and selector_debug.csv")
+    p.add_argument("--top-k", type=int, default=5, help="Number of detector-ranked candidates to replay per frame")
+    p.add_argument("--max-frame-id", type=int, default=None, help="Optional last frame id to emit, including missing frames")
+    p.add_argument("--max-jump-px", type=float, default=48.0, help="Guard threshold for motion/memory center jump")
+    p.add_argument("--max-recover-frames", type=int, default=3, help="Frames to bridge with memory prediction before LOST")
+    p.add_argument("--min-accept-score", type=float, default=0.25)
+    p.add_argument("--min-motion-consistency", type=float, default=0.15)
+    p.add_argument("--min-memory-consistency", type=float, default=0.15)
+    p.add_argument("--min-topk-margin", type=float, default=0.0)
+    p.add_argument("--detector-weight", type=float, default=0.55)
+    p.add_argument("--motion-weight", type=float, default=0.25)
+    p.add_argument("--memory-weight", type=float, default=0.20)
+    p.add_argument("--reacquire-top-k", type=int, default=0, help="Deep candidates to scan for REACQUIRE; 0 scans all frame candidates")
+    p.add_argument("--reacquire-max-distance-px", type=float, default=96.0, help="Maximum center distance from predicted memory bbox for REACQUIRE")
+    p.add_argument("--reacquire-min-detector-score", type=float, default=0.10, help="Minimum detector score for a REACQUIRE candidate")
+    p.add_argument("--reacquire-min-motion-consistency", type=float, default=0.30, help="Minimum predicted-motion consistency for a REACQUIRE candidate")
+    p.add_argument("--reacquire-min-memory-consistency", type=float, default=0.20, help="Minimum recent-memory consistency for a REACQUIRE candidate")
+    p.add_argument("--reacquire-min-side-ratio", type=float, default=0.35, help="Minimum candidate/reference side ratio for REACQUIRE")
+    p.add_argument("--reacquire-max-side-ratio", type=float, default=2.50, help="Maximum candidate/reference side ratio for REACQUIRE")
+    p.add_argument("--reacquire-confirm-frames", type=int, default=2, help="Consecutive candidate frames required before REACQUIRE is emitted")
+    p.add_argument("--reacquire-stale-after-frames", type=int, default=-1, help="Enable global REACQUIRE after this LOST streak; -1 disables it")
+    p.add_argument("--reacquire-global-min-area", type=float, default=0.0, help="Minimum bbox area for stale global REACQUIRE candidates")
+    p.add_argument("--reacquire-global-small-min-area", type=float, default=0.0, help="Optional lower bbox area floor for size-adaptive stale global REACQUIRE; requires tracklet-confirmed, crop-persistent pending candidates")
+    p.add_argument("--reacquire-global-small-max-distance-px", type=float, default=0.0, help="Optional max distance from predicted memory for size-adaptive small-area global REACQUIRE; 0 disables this cap")
+    p.add_argument("--reacquire-global-small-memory-probation-frames", type=int, default=0, help="Suppress memory-near REACQUIRE for this many frames after a confirmed small-area global seed")
+    p.add_argument("--reacquire-global-max-area", type=float, default=0.0, help="Maximum bbox area for stale global REACQUIRE candidates; 0 disables the cap")
+    p.add_argument("--reacquire-global-min-detector-score", type=float, default=0.10, help="Minimum detector score for stale global REACQUIRE candidates")
+    p.add_argument("--reacquire-global-require-tracklet-confirmation", action="store_true", help="Require positive tracklet-classifier evidence for stale global REACQUIRE candidates")
+    p.add_argument("--reacquire-global-reject-tracklet-rejected", action="store_true", help="Reject stale global REACQUIRE candidates only when tracklet filtering explicitly marked them rejected")
+    p.add_argument("--reacquire-global-min-tracklet-score", type=float, default=0.50, help="Minimum tracklet classifier probability when global tracklet confirmation is required")
+    p.add_argument("--reacquire-global-delayed-confirm-frames", type=int, default=0, help="Override global REACQUIRE confirmation window; 0 uses --reacquire-confirm-frames")
+    p.add_argument("--reacquire-min-appearance-similarity", type=float, default=0.0, help="Minimum HSV crop similarity to recent accepted boxes for REACQUIRE; 0 disables it")
+    p.add_argument("--reacquire-appearance-weight", type=float, default=0.0, help="Soft HSV crop similarity weight added to REACQUIRE ranking; 0 disables it")
+    p.add_argument("--reacquire-crop-score-field", default="", help="Optional candidate row field containing precomputed crop/re-id drone probability")
+    p.add_argument("--reacquire-crop-weight", type=float, default=0.0, help="Soft crop classifier/re-id score weight added to REACQUIRE ranking; 0 disables it")
+    p.add_argument("--reacquire-min-crop-drone-score", type=float, default=0.0, help="Minimum crop classifier/re-id drone probability for REACQUIRE; 0 disables it")
+    p.add_argument("--reacquire-crop-weights", default=None, help="Optional CropRecognizer checkpoint used to score REACQUIRE crops from --video")
+    p.add_argument("--reacquire-crop-image-size", type=int, default=128, help="CropRecognizer input size when --reacquire-crop-weights is provided")
+    p.add_argument("--appearance-memory-size", type=int, default=8, help="Recent accepted candidate crops stored for appearance REACQUIRE")
+    p.add_argument("--video", default=None, help="Optional source video for selector_annotated.mp4")
+    p.add_argument("--save-video", action="store_true", help="Render annotated video when --video is provided")
+    p.set_defaults(func=cmd_offline_selector_replay)
 
     p = sub.add_parser("build-crop-dataset")
     p.add_argument("--frames", default=None)
