@@ -396,6 +396,18 @@ Seed-admission classifier smoke:
 - interpretation: the trainer I/O works, but the dataset is not ready for a deployable admission model. The next data step is still to add more positive REACQUIRE segments and audit ambiguous negatives.
 - Modal entrypoint check: `modal run tools\modal_seed_admission_train.py --help` lists `--dataset`, `--out`, `--epochs`, `--lr`, `--hidden`, `--thresholds`, and `--smoke`.
 
+Held-out seg05 seed-admission refresh:
+
+- selector output: `runs\e164_selector_probe\seed_admission_audit_sources\seg05_probation48_sourcepred`
+- labeled CSV: `runs\e164_selector_probe\seed_admission_datasets\seg05_probation48_seed_admission.csv`
+- summary: `2` total rows, `2` positive, `0` negative, `0` ignored.
+- positive rows: f212/f213, both center-match positives with GT center distance about `16 px`, crop scores about `0.994`, and tracklet classifier probability about `0.798`.
+- merged CSV: `runs\e164_selector_probe\seed_admission_datasets\seg01_05_probation48_seed_admission.csv`
+- merged summary: `44` total rows, `6` positive, `38` negative, `0` ignored.
+- seg01-05 local smoke output: `runs\e164_selector_probe\seed_admission_smoke\local_seg01_05_probation48`
+- seg01-05 smoke result: best threshold `0.50`, `tp=6`, `fp=34`, `fn=0`, `tn=4`, precision `0.150`, recall `1.000`, F1 `0.261`.
+- interpretation: seg05 adds useful positive examples and improves the smoke metric, but false positives remain too high. Continue mining additional true REACQUIRE positives and hard negatives before promoting any learned admission model.
+
 ## Candidate Repeated-Small-Global Guard
 
 Implementation:
