@@ -98,7 +98,7 @@ from qstr_dronedet.tracking.action_prior_fusion import (
     sweep_action_frame_prior_fusion,
     sweep_action_frame_prior_fusion_run_root,
 )
-from qstr_dronedet.tracking.offline_selector import replay_offline_selector
+from qstr_dronedet.tracking.offline_selector import build_seed_admission_dataset, replay_offline_selector
 from qstr_dronedet.tracking.proposal_tracklets import (
     build_proposal_tracklet_dataset,
     compare_flat_prediction_eval_summaries,
@@ -751,6 +751,8 @@ def cmd_offline_selector_replay(args: argparse.Namespace) -> None:
         reacquire_global_small_min_area=args.reacquire_global_small_min_area,
         reacquire_global_small_max_distance_px=args.reacquire_global_small_max_distance_px,
         reacquire_global_small_memory_probation_frames=args.reacquire_global_small_memory_probation_frames,
+        reacquire_global_small_repeat_cooldown_frames=args.reacquire_global_small_repeat_cooldown_frames,
+        reacquire_global_small_repeat_max_distance_px=args.reacquire_global_small_repeat_max_distance_px,
         reacquire_global_max_area=args.reacquire_global_max_area,
         reacquire_global_min_detector_score=args.reacquire_global_min_detector_score,
         reacquire_global_require_tracklet_confirmation=args.reacquire_global_require_tracklet_confirmation,
@@ -780,6 +782,20 @@ def cmd_offline_selector_replay(args: argparse.Namespace) -> None:
             indent=2,
         )
     )
+
+
+def cmd_build_seed_admission_dataset(args: argparse.Namespace) -> None:
+    result = build_seed_admission_dataset(
+        args.seed_audit,
+        args.annotations,
+        args.out,
+        dataset_source=args.dataset_source,
+        run_id=args.run_id,
+        iou_threshold=args.iou_threshold,
+        center_distance_threshold_px=args.center_distance_threshold_px,
+        interpolate_gt=not args.no_interpolate_gt,
+    )
+    print(json.dumps(result.summary, indent=2))
 
 
 def _load_fusion_calibration(path: str | None) -> dict[str, float] | None:
@@ -3199,6 +3215,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reacquire-global-small-min-area", type=float, default=0.0, help="Optional lower bbox area floor for size-adaptive stale global REACQUIRE; requires tracklet-confirmed, crop-persistent pending candidates")
     p.add_argument("--reacquire-global-small-max-distance-px", type=float, default=0.0, help="Optional max distance from predicted memory for size-adaptive small-area global REACQUIRE; 0 disables this cap")
     p.add_argument("--reacquire-global-small-memory-probation-frames", type=int, default=0, help="Suppress memory-near REACQUIRE for this many frames after a confirmed small-area global seed")
+    p.add_argument("--reacquire-global-small-repeat-cooldown-frames", type=int, default=0, help="Reject repeated small-area global seeds inside this cooldown unless spatially continuous; 0 disables this guard")
+    p.add_argument("--reacquire-global-small-repeat-max-distance-px", type=float, default=0.0, help="Maximum center distance from the last accepted small-area global seed during repeat cooldown; 0 rejects all repeats")
     p.add_argument("--reacquire-global-max-area", type=float, default=0.0, help="Maximum bbox area for stale global REACQUIRE candidates; 0 disables the cap")
     p.add_argument("--reacquire-global-min-detector-score", type=float, default=0.10, help="Minimum detector score for stale global REACQUIRE candidates")
     p.add_argument("--reacquire-global-require-tracklet-confirmation", action="store_true", help="Require positive tracklet-classifier evidence for stale global REACQUIRE candidates")
@@ -3216,6 +3234,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--video", default=None, help="Optional source video for selector_annotated.mp4")
     p.add_argument("--save-video", action="store_true", help="Render annotated video when --video is provided")
     p.set_defaults(func=cmd_offline_selector_replay)
+
+    p = sub.add_parser("build-seed-admission-dataset")
+    p.add_argument("--seed-audit", required=True, help="reacquire_seed_audit.csv written by offline-selector-replay")
+    p.add_argument("--annotations", required=True, help="Sparse/exact GT bbox CSV with frame_id,x1,y1,x2,y2 columns")
+    p.add_argument("--out", required=True, help="Output CSV for seed-admission training rows")
+    p.add_argument("--dataset-source", default="", help="Segment/source id stamped on every output row")
+    p.add_argument("--run-id", default="", help="Selector run id stamped on every output row")
+    p.add_argument("--iou-threshold", type=float, default=0.10, help="Positive label threshold for seed/GT IoU")
+    p.add_argument("--center-distance-threshold-px", type=float, default=32.0, help="Positive label threshold for seed/GT center distance")
+    p.add_argument("--no-interpolate-gt", action="store_true", help="Only label frames with exact annotation rows")
+    p.set_defaults(func=cmd_build_seed_admission_dataset)
 
     p = sub.add_parser("build-crop-dataset")
     p.add_argument("--frames", default=None)

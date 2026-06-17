@@ -346,3 +346,63 @@ Seg04 sparse checks:
 Updated decision:
 
 Promote `cropdense_min050_trackletveto_delay4_sizeadaptive_probation48` as the current E164 default probe. It preserves seg01, seg02, and seg03 behavior from sizeadaptive, preserves the seg04 f259-f292 continuation, and removes the f294-f298 memory-near drift chain. The next highest-priority experiment is a repeated-small-global admission guard, focused on f304/f397 without killing f88/f206.
+
+## Seed Admission Audit Dataset
+
+Implementation:
+
+- every `offline-selector-replay` run now writes `reacquire_seed_audit.csv`.
+- the audit records global seed admission features needed for a later learned admission head: bbox area, detector score, selector score, motion/memory consistency, jump/distance, crop score, appearance score, tracklet fields, sequence-gate fields, small-global repeat state, and final pending/confirmed/rejected event.
+- the selector summary now includes `reacquire_seed_audit_csv` and `reacquire_seed_audit_rows`.
+- `build-seed-admission-dataset` converts the audit rows into supervised training rows by aligning each seed bbox to exact or linearly interpolated sparse GT and adding `seed_label`, `label_reason`, `gt_iou`, `gt_center_distance_px`, and `sample_weight`.
+- rows outside GT coverage are ignored with `sample_weight=0` instead of being treated as background negatives.
+
+This turns f304/f397-style failures into supervised seed-admission rows instead of only hard-coded threshold anecdotes.
+
+Seg04 repeat48d120 labeled export:
+
+- command: `python -m qstr_dronedet.cli build-seed-admission-dataset --seed-audit runs\e164_selector_probe\dji_broad_seg04_v2_e164_default_cropdense_min050_trackletveto_delay4_sizeadaptive_probation48_repeat48d120_sourcepred\reacquire_seed_audit.csv --annotations D:\datasets\my_video\validation_segments\dji_fly_20260522_113924_5x20s\annotations\dji_fly_20260522_113924_10_1779475848691_hdrvideo_seg04_005971_006569_boxes.csv --out runs\e164_selector_probe\seed_admission_datasets\seg04_repeat48d120_seed_admission.csv --dataset-source dji_broad_seg04 --run-id cropdense_min050_trackletveto_delay4_sizeadaptive_probation48_repeat48d120`
+- output: `runs\e164_selector_probe\seed_admission_datasets\seg04_repeat48d120_seed_admission.csv`
+- summary: `total_rows=22`, `labeled_rows=22`, `positive_rows=4`, `negative_rows=18`, `ignored_rows=0`
+- positives: f87/f88 and f205/f206.
+- hard negatives include f303/f304, f306, and f397; f256 is also labeled negative under sparse linear interpolation and should be reviewed visually before using as a hard negative.
+
+Default probation48 labeled export:
+
+- audit source outputs:
+  - `runs\e164_selector_probe\seed_admission_audit_sources\seg01_probation48`
+  - `runs\e164_selector_probe\seed_admission_audit_sources\seg02_probation48`
+  - `runs\e164_selector_probe\seed_admission_audit_sources\seg03_probation48`
+  - `runs\e164_selector_probe\seed_admission_audit_sources\seg04_probation48_sourcepred`
+- labeled CSV outputs:
+  - `runs\e164_selector_probe\seed_admission_datasets\seg01_probation48_seed_admission.csv`: `12` rows, `0` positive, `12` negative
+  - `runs\e164_selector_probe\seed_admission_datasets\seg02_probation48_seed_admission.csv`: `2` rows, `0` positive, `2` negative
+  - `runs\e164_selector_probe\seed_admission_datasets\seg03_probation48_seed_admission.csv`: `8` rows, `0` positive, `8` negative
+  - `runs\e164_selector_probe\seed_admission_datasets\seg04_probation48_seed_admission.csv`: `20` rows, `4` positive, `16` negative
+- merged CSV: `runs\e164_selector_probe\seed_admission_datasets\seg01_04_probation48_seed_admission.csv`
+- merged summary: `42` total rows, `4` positive, `38` negative, `0` ignored.
+- training caution: positives currently come only from seg04 under sparse GT interpolation. Before training a default admission head, add more true-reacquire positives or manually review ambiguous negatives to avoid a segment-specific classifier.
+
+## Candidate Repeated-Small-Global Guard
+
+Implementation:
+
+- added optional CLI args:
+  - `--reacquire-global-small-repeat-cooldown-frames`
+  - `--reacquire-global-small-repeat-max-distance-px`
+- when enabled, a small-area global seed inside the cooldown is rejected if its center is too far from the last confirmed small-area global seed.
+- default remains disabled; this is an experiment guard, not the current default probe.
+
+Seg04 candidate run:
+
+- output: `runs\e164_selector_probe\dji_broad_seg04_v2_e164_default_cropdense_min050_trackletveto_delay4_sizeadaptive_probation48_repeat48d120_sourcepred`
+- settings: repeat cooldown `48`, repeat max distance `120 px`
+- summary: `reacquired_frames=6`, `global=6`, `small_global=6`, `repeat_rejected=6`, `seed_audit_rows=22`, `lost_frames=367`
+- exact sparse annotations: selected `5/10`, IoU >= `0.1` on `4/10`
+- f303/f304 are rejected by `reacquire_global_small_repeat_inconsistent`.
+- f257-f258 RECOVER grace and f259-f292 TRACK are preserved.
+- f306 and f397 still become small-area global REACQUIRE; therefore repeat48d120 is useful diagnostic evidence but not sufficient as a default guard.
+
+Updated next step:
+
+Do not promote the repeated-small-global rule by itself. Export seed-admission datasets for seg01-04 with the same command shape, visually audit ambiguous negative rows such as seg04 f256, then train or fit a small seed-admission head/logistic model on Modal and compare it against `probation48` and `repeat48d120` on held-out segments.

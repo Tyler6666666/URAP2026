@@ -2,15 +2,24 @@ import csv
 import json
 import subprocess
 import sys
+from pathlib import Path
 
-from qstr_dronedet.tracking.offline_selector import replay_offline_selector
+from qstr_dronedet.tracking.offline_selector import build_seed_admission_dataset, replay_offline_selector
 
 
 def _write_jsonl(path, rows):
     path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
 
 
+def _write_csv_rows(path, fields, rows):
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def _read_csv(path):
+    path = Path(path)
     with path.open("r", encoding="utf-8", newline="") as f:
         return list(csv.DictReader(f))
 
@@ -874,6 +883,269 @@ def test_offline_selector_size_adaptive_global_reacquire_accepts_small_confirmed
     assert result.summary["reacquire_global_small_area_frames"] == 1
 
 
+def test_offline_selector_writes_reacquire_seed_audit_with_admission_features(tmp_path):
+    pred = tmp_path / "predictions.jsonl"
+    _write_jsonl(
+        pred,
+        [
+            {"frame_id": 0, "bbox": [10, 10, 20, 20], "objectness": 0.80, "final_drone_score": 0.70, "source": "yolo"},
+            {"frame_id": 1, "bbox": [12, 10, 22, 20], "objectness": 0.78, "final_drone_score": 0.68, "source": "yolo"},
+            {
+                "frame_id": 3,
+                "bbox": [100, 100, 120, 110],
+                "objectness": 0.90,
+                "final_drone_score": 0.45,
+                "source": "tracker+yolo_tile",
+                "crop_drone_score": 0.70,
+                "tracklet_filter_applied": True,
+                "tracklet_is_drone": True,
+                "tracklet_classifier_prob": 0.95,
+                "sequence_gate_confirmed": True,
+                "sequence_gate_reason": "linked",
+                "diagnostic_cause": "tracklet_confirmed",
+            },
+            {
+                "frame_id": 4,
+                "bbox": [102, 100, 122, 110],
+                "objectness": 0.91,
+                "final_drone_score": 0.46,
+                "source": "tracker+yolo_tile",
+                "crop_drone_score": 0.72,
+                "tracklet_filter_applied": True,
+                "tracklet_is_drone": True,
+                "tracklet_classifier_prob": 0.96,
+                "sequence_gate_confirmed": True,
+                "sequence_gate_reason": "linked",
+                "diagnostic_cause": "tracklet_confirmed",
+            },
+        ],
+    )
+
+    result = replay_offline_selector(
+        pred,
+        tmp_path / "selector",
+        top_k=1,
+        max_frame_id=5,
+        max_jump_px=5.0,
+        max_recover_frames=0,
+        min_accept_score=0.70,
+        min_motion_consistency=0.80,
+        min_memory_consistency=0.80,
+        reacquire_confirm_frames=2,
+        reacquire_global_delayed_confirm_frames=4,
+        reacquire_stale_after_frames=1,
+        reacquire_global_min_area=1000.0,
+        reacquire_global_small_min_area=100.0,
+        reacquire_global_max_area=3000.0,
+        reacquire_global_min_detector_score=0.10,
+        reacquire_global_min_tracklet_score=0.50,
+        reacquire_crop_score_field="crop_drone_score",
+        reacquire_min_crop_drone_score=0.50,
+    )
+
+    audit = _read_csv(result.summary["reacquire_seed_audit_csv"])
+
+    assert result.summary["reacquire_seed_audit_rows"] == 2
+    assert audit[0]["event"] == "pending"
+    assert audit[1]["event"] == "confirmed"
+    assert audit[1]["admitted"] == "1"
+    assert audit[1]["reacquire_mode"] == "global"
+    assert audit[1]["global_small_area_candidate"] == "1"
+    assert audit[1]["bbox_area"] == "200.000000"
+    assert audit[1]["crop_drone_score"] == "0.720000"
+    assert audit[1]["tracklet_is_drone"] == "True"
+    assert audit[1]["tracklet_classifier_prob"] == "0.960000"
+    assert audit[1]["sequence_gate_confirmed"] == "True"
+    assert audit[1]["sequence_gate_reason"] == "linked"
+
+
+def test_offline_selector_repeated_small_global_guard_rejects_far_seed(tmp_path):
+    pred = tmp_path / "predictions.jsonl"
+    _write_jsonl(
+        pred,
+        [
+            {"frame_id": 0, "bbox": [10, 10, 20, 20], "objectness": 0.80, "final_drone_score": 0.70, "source": "yolo"},
+            {"frame_id": 1, "bbox": [12, 10, 22, 20], "objectness": 0.78, "final_drone_score": 0.68, "source": "yolo"},
+            {
+                "frame_id": 3,
+                "bbox": [100, 100, 120, 110],
+                "objectness": 0.90,
+                "final_drone_score": 0.45,
+                "source": "tracker+yolo_tile",
+                "crop_drone_score": 0.80,
+                "tracklet_filter_applied": True,
+                "tracklet_is_drone": True,
+                "tracklet_classifier_prob": 0.95,
+                "diagnostic_cause": "tracklet_confirmed",
+            },
+            {
+                "frame_id": 4,
+                "bbox": [102, 100, 122, 110],
+                "objectness": 0.91,
+                "final_drone_score": 0.46,
+                "source": "tracker+yolo_tile",
+                "crop_drone_score": 0.82,
+                "tracklet_filter_applied": True,
+                "tracklet_is_drone": True,
+                "tracklet_classifier_prob": 0.96,
+                "diagnostic_cause": "tracklet_confirmed",
+            },
+            {
+                "frame_id": 10,
+                "bbox": [250, 100, 270, 110],
+                "objectness": 0.92,
+                "final_drone_score": 0.47,
+                "source": "tracker+yolo_tile",
+                "crop_drone_score": 0.99,
+                "tracklet_filter_applied": True,
+                "tracklet_is_drone": True,
+                "tracklet_classifier_prob": 0.97,
+                "diagnostic_cause": "tracklet_confirmed",
+            },
+            {
+                "frame_id": 11,
+                "bbox": [252, 100, 272, 110],
+                "objectness": 0.93,
+                "final_drone_score": 0.48,
+                "source": "tracker+yolo_tile",
+                "crop_drone_score": 0.99,
+                "tracklet_filter_applied": True,
+                "tracklet_is_drone": True,
+                "tracklet_classifier_prob": 0.98,
+                "diagnostic_cause": "tracklet_confirmed",
+            },
+        ],
+    )
+
+    result = replay_offline_selector(
+        pred,
+        tmp_path / "selector",
+        top_k=1,
+        max_frame_id=11,
+        max_jump_px=5.0,
+        max_recover_frames=0,
+        min_accept_score=0.70,
+        min_motion_consistency=0.80,
+        min_memory_consistency=0.80,
+        reacquire_confirm_frames=2,
+        reacquire_global_delayed_confirm_frames=4,
+        reacquire_stale_after_frames=1,
+        reacquire_global_min_area=1000.0,
+        reacquire_global_small_min_area=100.0,
+        reacquire_global_max_area=3000.0,
+        reacquire_global_min_detector_score=0.10,
+        reacquire_global_min_tracklet_score=0.50,
+        reacquire_global_small_repeat_cooldown_frames=20,
+        reacquire_global_small_repeat_max_distance_px=50.0,
+        reacquire_crop_score_field="crop_drone_score",
+        reacquire_min_crop_drone_score=0.50,
+    )
+
+    trajectory = _read_csv(result.trajectory_csv)
+    audit = _read_csv(result.summary["reacquire_seed_audit_csv"])
+
+    assert trajectory[4]["state"] == "REACQUIRE"
+    assert all(row["state"] != "REACQUIRE" for row in trajectory[10:])
+    assert result.summary["reacquired_frames"] == 1
+    assert result.summary["reacquire_global_small_area_frames"] == 1
+    assert result.summary["reacquire_global_small_repeat_rejected_frames"] == 2
+    assert [row["guard_reason"] for row in audit if row["event"] == "rejected"] == [
+        "reacquire_global_small_repeat_inconsistent",
+        "reacquire_global_small_repeat_inconsistent",
+    ]
+
+
+def test_offline_selector_repeated_small_global_guard_allows_near_seed(tmp_path):
+    pred = tmp_path / "predictions.jsonl"
+    _write_jsonl(
+        pred,
+        [
+            {"frame_id": 0, "bbox": [10, 10, 20, 20], "objectness": 0.80, "final_drone_score": 0.70, "source": "yolo"},
+            {"frame_id": 1, "bbox": [12, 10, 22, 20], "objectness": 0.78, "final_drone_score": 0.68, "source": "yolo"},
+            {
+                "frame_id": 3,
+                "bbox": [100, 100, 120, 110],
+                "objectness": 0.90,
+                "final_drone_score": 0.45,
+                "source": "tracker+yolo_tile",
+                "crop_drone_score": 0.80,
+                "tracklet_filter_applied": True,
+                "tracklet_is_drone": True,
+                "tracklet_classifier_prob": 0.95,
+                "diagnostic_cause": "tracklet_confirmed",
+            },
+            {
+                "frame_id": 4,
+                "bbox": [102, 100, 122, 110],
+                "objectness": 0.91,
+                "final_drone_score": 0.46,
+                "source": "tracker+yolo_tile",
+                "crop_drone_score": 0.82,
+                "tracklet_filter_applied": True,
+                "tracklet_is_drone": True,
+                "tracklet_classifier_prob": 0.96,
+                "diagnostic_cause": "tracklet_confirmed",
+            },
+            {
+                "frame_id": 10,
+                "bbox": [116, 100, 136, 110],
+                "objectness": 0.92,
+                "final_drone_score": 0.47,
+                "source": "tracker+yolo_tile",
+                "crop_drone_score": 0.99,
+                "tracklet_filter_applied": True,
+                "tracklet_is_drone": True,
+                "tracklet_classifier_prob": 0.97,
+                "diagnostic_cause": "tracklet_confirmed",
+            },
+            {
+                "frame_id": 11,
+                "bbox": [118, 100, 138, 110],
+                "objectness": 0.93,
+                "final_drone_score": 0.48,
+                "source": "tracker+yolo_tile",
+                "crop_drone_score": 0.99,
+                "tracklet_filter_applied": True,
+                "tracklet_is_drone": True,
+                "tracklet_classifier_prob": 0.98,
+                "diagnostic_cause": "tracklet_confirmed",
+            },
+        ],
+    )
+
+    result = replay_offline_selector(
+        pred,
+        tmp_path / "selector",
+        top_k=1,
+        max_frame_id=11,
+        max_jump_px=5.0,
+        max_recover_frames=0,
+        min_accept_score=0.70,
+        min_motion_consistency=0.80,
+        min_memory_consistency=0.80,
+        reacquire_confirm_frames=2,
+        reacquire_global_delayed_confirm_frames=4,
+        reacquire_stale_after_frames=1,
+        reacquire_global_min_area=1000.0,
+        reacquire_global_small_min_area=100.0,
+        reacquire_global_max_area=3000.0,
+        reacquire_global_min_detector_score=0.10,
+        reacquire_global_min_tracklet_score=0.50,
+        reacquire_global_small_repeat_cooldown_frames=20,
+        reacquire_global_small_repeat_max_distance_px=50.0,
+        reacquire_crop_score_field="crop_drone_score",
+        reacquire_min_crop_drone_score=0.50,
+    )
+
+    trajectory = _read_csv(result.trajectory_csv)
+
+    assert trajectory[4]["state"] == "REACQUIRE"
+    assert trajectory[11]["state"] == "REACQUIRE"
+    assert result.summary["reacquired_frames"] == 2
+    assert result.summary["reacquire_global_small_area_frames"] == 2
+    assert result.summary["reacquire_global_small_repeat_rejected_frames"] == 0
+
+
 def test_offline_selector_size_adaptive_global_reacquire_rejects_sequence_gate_rejected_seed(tmp_path):
     pred = tmp_path / "predictions.jsonl"
     _write_jsonl(
@@ -1722,3 +1994,170 @@ def test_offline_selector_replay_cli_writes_outputs(tmp_path):
     assert (out / "trajectory.csv").exists()
     assert (out / "selector_debug.csv").exists()
     assert (out / "selector_summary.json").exists()
+
+
+def test_build_seed_admission_dataset_labels_interpolated_seed_rows(tmp_path):
+    seed_audit = tmp_path / "reacquire_seed_audit.csv"
+    annotations = tmp_path / "annotations.csv"
+    out_csv = tmp_path / "seed_admission.csv"
+    audit_fields = [
+        "frame_id",
+        "event",
+        "admitted",
+        "reacquire_mode",
+        "x1",
+        "y1",
+        "x2",
+        "y2",
+        "selector_score",
+        "detector_score",
+        "tracklet_is_drone",
+        "crop_drone_score",
+    ]
+    _write_csv_rows(
+        seed_audit,
+        audit_fields,
+        [
+            {
+                "frame_id": 5,
+                "event": "confirmed",
+                "admitted": 1,
+                "reacquire_mode": "global",
+                "x1": 15,
+                "y1": 10,
+                "x2": 25,
+                "y2": 20,
+                "selector_score": 0.71,
+                "detector_score": 0.64,
+                "tracklet_is_drone": 1,
+                "crop_drone_score": 0.88,
+            },
+            {
+                "frame_id": 6,
+                "event": "rejected",
+                "admitted": 0,
+                "reacquire_mode": "global",
+                "x1": 80,
+                "y1": 80,
+                "x2": 90,
+                "y2": 90,
+                "selector_score": 0.69,
+                "detector_score": 0.62,
+                "tracklet_is_drone": 1,
+                "crop_drone_score": 0.91,
+            },
+        ],
+    )
+    _write_csv_rows(
+        annotations,
+        ["frame_id", "x1", "y1", "x2", "y2"],
+        [
+            {"frame_id": 0, "x1": 10, "y1": 10, "x2": 20, "y2": 20},
+            {"frame_id": 10, "x1": 20, "y1": 10, "x2": 30, "y2": 20},
+        ],
+    )
+
+    result = build_seed_admission_dataset(
+        seed_audit,
+        annotations,
+        out_csv,
+        dataset_source="seg-test",
+        run_id="run-test",
+        iou_threshold=0.25,
+        center_distance_threshold_px=12.0,
+    )
+
+    rows = _read_csv(out_csv)
+    assert result.summary["total_rows"] == 2
+    assert result.summary["positive_rows"] == 1
+    assert result.summary["negative_rows"] == 1
+    assert rows[0]["dataset_source"] == "seg-test"
+    assert rows[0]["run_id"] == "run-test"
+    assert rows[0]["has_gt"] == "1"
+    assert rows[0]["gt_frame_source"] == "interpolated"
+    assert rows[0]["seed_label"] == "1"
+    assert rows[0]["label_reason"] == "iou_match"
+    assert float(rows[0]["gt_iou"]) > 0.99
+    assert rows[1]["seed_label"] == "0"
+    assert rows[1]["label_reason"] == "no_match"
+    assert float(rows[1]["gt_center_distance_px"]) > 80.0
+
+
+def test_build_seed_admission_dataset_ignores_rows_without_gt_support(tmp_path):
+    seed_audit = tmp_path / "reacquire_seed_audit.csv"
+    annotations = tmp_path / "annotations.csv"
+    out_csv = tmp_path / "seed_admission.csv"
+    _write_csv_rows(
+        seed_audit,
+        ["frame_id", "event", "admitted", "x1", "y1", "x2", "y2"],
+        [
+            {"frame_id": 5, "event": "pending", "admitted": 0, "x1": 15, "y1": 10, "x2": 25, "y2": 20},
+        ],
+    )
+    _write_csv_rows(
+        annotations,
+        ["frame_id", "x1", "y1", "x2", "y2"],
+        [
+            {"frame_id": 10, "x1": 20, "y1": 10, "x2": 30, "y2": 20},
+            {"frame_id": 20, "x1": 30, "y1": 10, "x2": 40, "y2": 20},
+        ],
+    )
+
+    result = build_seed_admission_dataset(seed_audit, annotations, out_csv)
+
+    rows = _read_csv(out_csv)
+    assert result.summary["ignored_rows"] == 1
+    assert result.summary["labeled_rows"] == 0
+    assert rows[0]["has_gt"] == "0"
+    assert rows[0]["seed_label"] == ""
+    assert rows[0]["label_reason"] == "no_gt"
+    assert rows[0]["sample_weight"] == "0.000000"
+
+
+def test_build_seed_admission_dataset_cli_writes_labeled_csv(tmp_path):
+    seed_audit = tmp_path / "reacquire_seed_audit.csv"
+    annotations = tmp_path / "annotations.csv"
+    out_csv = tmp_path / "seed_admission.csv"
+    _write_csv_rows(
+        seed_audit,
+        ["frame_id", "event", "admitted", "x1", "y1", "x2", "y2"],
+        [
+            {"frame_id": 3, "event": "confirmed", "admitted": 1, "x1": 30, "y1": 30, "x2": 40, "y2": 40},
+        ],
+    )
+    _write_csv_rows(
+        annotations,
+        ["frame_id", "x1", "y1", "x2", "y2"],
+        [
+            {"frame_id": 3, "x1": 30, "y1": 30, "x2": 40, "y2": 40},
+        ],
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "qstr_dronedet.cli",
+            "build-seed-admission-dataset",
+            "--seed-audit",
+            str(seed_audit),
+            "--annotations",
+            str(annotations),
+            "--out",
+            str(out_csv),
+            "--dataset-source",
+            "cli-seg",
+            "--run-id",
+            "cli-run",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    summary = json.loads(result.stdout)
+    rows = _read_csv(out_csv)
+    assert summary["positive_rows"] == 1
+    assert rows[0]["dataset_source"] == "cli-seg"
+    assert rows[0]["run_id"] == "cli-run"
+    assert rows[0]["seed_label"] == "1"

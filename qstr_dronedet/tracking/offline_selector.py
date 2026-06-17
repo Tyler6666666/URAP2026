@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import bisect
 import csv
 import json
 import math
@@ -17,6 +18,13 @@ class OfflineSelectorResult:
     debug_csv: Path
     summary_json: Path
     annotated_video: Path | None
+    summary: dict[str, Any]
+
+
+@dataclass
+class SeedAdmissionDatasetResult:
+    output_csv: Path
+    summary_json: Path
     summary: dict[str, Any]
 
 
@@ -48,6 +56,8 @@ def replay_offline_selector(
     reacquire_global_small_min_area: float = 0.0,
     reacquire_global_small_max_distance_px: float = 0.0,
     reacquire_global_small_memory_probation_frames: int = 0,
+    reacquire_global_small_repeat_cooldown_frames: int = 0,
+    reacquire_global_small_repeat_max_distance_px: float = 0.0,
     reacquire_global_max_area: float = 0.0,
     reacquire_global_min_detector_score: float = 0.10,
     reacquire_global_require_tracklet_confirmation: bool = False,
@@ -90,6 +100,7 @@ def replay_offline_selector(
     reacquire_global_small_area_frames = 0
     reacquire_memory_probation_rejected_frames = 0
     memory_recover_probation_rejected_frames = 0
+    reacquire_global_small_repeat_rejected_frames = 0
     appearance_rejected_frames = 0
     appearance_soft_scored_frames = 0
     crop_rejected_frames = 0
@@ -98,9 +109,11 @@ def replay_offline_selector(
     fallback_needed_frames = 0
     trajectory_rows: list[dict[str, Any]] = []
     debug_rows: list[dict[str, Any]] = []
+    reacquire_seed_audit_rows: list[dict[str, Any]] = []
     pending_reacquire: dict[str, Any] | None = None
     small_global_memory_probation_until_frame = -1
     small_global_memory_recover_grace_until_frame = -1
+    last_confirmed_small_global_seed: tuple[int, BBox] | None = None
     confirm_frames = max(1, int(reacquire_confirm_frames))
     global_confirm_frames = (
         max(confirm_frames, int(reacquire_global_delayed_confirm_frames))
@@ -256,6 +269,7 @@ def replay_offline_selector(
                         reacquire_global_frames += 1
                         if bool(next_pending.get("global_small_area_candidate", False)):
                             reacquire_global_small_area_frames += 1
+                            last_confirmed_small_global_seed = (frame_id, bbox)
                             small_global_memory_probation_until_frame = _extend_memory_probation(
                                 small_global_memory_probation_until_frame,
                                 frame_id,
@@ -268,6 +282,18 @@ def replay_offline_selector(
                     else:
                         reacquire_memory_frames += 1
                     confirmed_reason = f"confirmed_{next_pending['reason']}"
+                    if next_pending["mode"] == "global":
+                        reacquire_seed_audit_rows.append(
+                            _reacquire_seed_audit_row(
+                                frame_id,
+                                selected_item,
+                                event="confirmed",
+                                admitted=True,
+                                guard_reason="reacquire_confirmed",
+                                reacquire_reason=confirmed_reason,
+                                last_small_global_seed=last_confirmed_small_global_seed,
+                            )
+                        )
                     pending_reacquire = None
                     trajectory_rows.append(
                         _trajectory_row(
@@ -296,6 +322,18 @@ def replay_offline_selector(
                     continue
                 pending_reacquire = next_pending
                 reacquire_pending_frames += 1
+                if next_pending["mode"] == "global":
+                    reacquire_seed_audit_rows.append(
+                        _reacquire_seed_audit_row(
+                            frame_id,
+                            selected_item,
+                            event="pending",
+                            admitted=False,
+                            guard_reason="reacquire_pending_confirmation",
+                            reacquire_reason=f"pending_{next_pending['reason']}",
+                            last_small_global_seed=last_confirmed_small_global_seed,
+                        )
+                    )
                 decision = {"accepted": False, "guard_reason": "reacquire_pending_confirmation"}
                 selected_item = None
 
@@ -375,6 +413,28 @@ def replay_offline_selector(
                 reacquire_min_crop_drone_score=reacquire_min_crop_drone_score,
                 crop_stats=crop_stats,
             )
+            repeat_guard = _small_global_repeat_guard(
+                reacquired,
+                frame_id=frame_id,
+                last_small_global_seed=last_confirmed_small_global_seed,
+                cooldown_frames=reacquire_global_small_repeat_cooldown_frames,
+                max_distance_px=reacquire_global_small_repeat_max_distance_px,
+            )
+            if bool(repeat_guard["rejected"]):
+                reacquire_seed_audit_rows.append(
+                    _reacquire_seed_audit_row(
+                        frame_id,
+                        reacquired,
+                        event="rejected",
+                        admitted=False,
+                        guard_reason="reacquire_global_small_repeat_inconsistent",
+                        reacquire_reason=str(reacquired.get("reacquire_reason", "")),
+                        last_small_global_seed=last_confirmed_small_global_seed,
+                        repeat_guard=repeat_guard,
+                    )
+                )
+                reacquire_global_small_repeat_rejected_frames += 1
+                reacquired = None
         if reacquired is not None:
             pending_reacquire = _advance_pending_reacquire(pending_reacquire, reacquired, frame_id)
             _remember_global_tracklet_confirmation(
@@ -391,6 +451,18 @@ def replay_offline_selector(
             if pending_reacquire["count"] < required_confirm_frames:
                 reacquire_pending_frames += 1
                 decision = {"accepted": False, "guard_reason": "reacquire_pending_confirmation"}
+                if pending_reacquire["mode"] == "global":
+                    reacquire_seed_audit_rows.append(
+                        _reacquire_seed_audit_row(
+                            frame_id,
+                            reacquired,
+                            event="pending",
+                            admitted=False,
+                            guard_reason="reacquire_pending_confirmation",
+                            reacquire_reason=f"pending_{reacquire_reason}",
+                            last_small_global_seed=last_confirmed_small_global_seed,
+                        )
+                    )
                 debug_rows.append(
                     _debug_row(
                         frame_id,
@@ -418,6 +490,7 @@ def replay_offline_selector(
                     reacquire_global_frames += 1
                     if reacquire_small_area:
                         reacquire_global_small_area_frames += 1
+                        last_confirmed_small_global_seed = (frame_id, bbox)
                         small_global_memory_probation_until_frame = _extend_memory_probation(
                             small_global_memory_probation_until_frame,
                             frame_id,
@@ -432,6 +505,18 @@ def replay_offline_selector(
                 confirmed_reason = (
                     f"confirmed_{reacquire_reason}" if confirm_frames > 1 else reacquire_reason
                 )
+                if reacquire_mode == "global":
+                    reacquire_seed_audit_rows.append(
+                        _reacquire_seed_audit_row(
+                            frame_id,
+                            reacquired,
+                            event="confirmed",
+                            admitted=True,
+                            guard_reason="reacquire_confirmed" if confirm_frames > 1 else "reacquire_memory_proximity",
+                            reacquire_reason=confirmed_reason,
+                            last_small_global_seed=last_confirmed_small_global_seed,
+                        )
+                    )
                 trajectory_rows.append(
                     _trajectory_row(
                         frame_id,
@@ -520,8 +605,10 @@ def replay_offline_selector(
     trajectory_csv = out / "trajectory.csv"
     debug_csv = out / "selector_debug.csv"
     summary_json = out / "selector_summary.json"
+    reacquire_seed_audit_csv = out / "reacquire_seed_audit.csv"
     _write_csv(trajectory_csv, trajectory_rows, TRAJECTORY_FIELDS)
     _write_csv(debug_csv, debug_rows, DEBUG_FIELDS)
+    _write_csv(reacquire_seed_audit_csv, reacquire_seed_audit_rows, REACQUIRE_SEED_AUDIT_FIELDS)
     summary = {
         "predictions_jsonl": str(pred_path),
         "total_frames": len(trajectory_rows),
@@ -536,8 +623,12 @@ def replay_offline_selector(
         "reacquire_global_small_min_area": reacquire_global_small_min_area,
         "reacquire_global_small_max_distance_px": reacquire_global_small_max_distance_px,
         "reacquire_global_small_memory_probation_frames": int(reacquire_global_small_memory_probation_frames),
+        "reacquire_global_small_repeat_cooldown_frames": int(reacquire_global_small_repeat_cooldown_frames),
+        "reacquire_global_small_repeat_max_distance_px": reacquire_global_small_repeat_max_distance_px,
+        "reacquire_global_small_repeat_rejected_frames": reacquire_global_small_repeat_rejected_frames,
         "reacquire_memory_probation_rejected_frames": reacquire_memory_probation_rejected_frames,
         "memory_recover_probation_rejected_frames": memory_recover_probation_rejected_frames,
+        "reacquire_seed_audit_rows": len(reacquire_seed_audit_rows),
         "appearance_rejected_frames": appearance_rejected_frames,
         "appearance_soft_scored_frames": appearance_soft_scored_frames,
         "appearance_memory_frames": len(appearance_memory),
@@ -552,6 +643,7 @@ def replay_offline_selector(
         "fallback_needed_frames": fallback_needed_frames,
         "trajectory_csv": str(trajectory_csv),
         "debug_csv": str(debug_csv),
+        "reacquire_seed_audit_csv": str(reacquire_seed_audit_csv),
     }
     summary_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     annotated_video = _render_video(video, trajectory_rows, out) if save_video and video else None
@@ -606,6 +698,177 @@ DEBUG_FIELDS = [
     "appearance_similarity",
     "crop_drone_score",
 ]
+
+
+REACQUIRE_SEED_AUDIT_FIELDS = [
+    "frame_id",
+    "event",
+    "admitted",
+    "guard_reason",
+    "reacquire_mode",
+    "reacquire_reason",
+    "global_small_area_candidate",
+    "x1",
+    "y1",
+    "x2",
+    "y2",
+    "bbox_area",
+    "selector_score",
+    "detector_score",
+    "motion_consistency",
+    "memory_consistency",
+    "jump_px",
+    "reacquire_distance_px",
+    "appearance_similarity",
+    "crop_drone_score",
+    "tracklet_filter_applied",
+    "tracklet_is_drone",
+    "tracklet_classifier_prob",
+    "sequence_gate_confirmed",
+    "sequence_gate_reason",
+    "diagnostic_cause",
+    "small_global_since_last_frame",
+    "small_global_repeat_distance_px",
+    "small_global_repeat_cooldown_active",
+]
+
+
+SEED_ADMISSION_LABEL_FIELDS = [
+    "dataset_source",
+    "run_id",
+    "has_gt",
+    "gt_frame_source",
+    "gt_x1",
+    "gt_y1",
+    "gt_x2",
+    "gt_y2",
+    "gt_iou",
+    "gt_center_distance_px",
+    "seed_label",
+    "label_reason",
+    "sample_weight",
+]
+
+
+def build_seed_admission_dataset(
+    seed_audit_csv: str | Path,
+    annotations_csv: str | Path,
+    out_csv: str | Path,
+    *,
+    dataset_source: str = "",
+    run_id: str = "",
+    iou_threshold: float = 0.10,
+    center_distance_threshold_px: float = 32.0,
+    interpolate_gt: bool = True,
+) -> SeedAdmissionDatasetResult:
+    """Label reacquire seed audit rows against sparse GT for admission training."""
+    seed_path = Path(seed_audit_csv)
+    anno_path = Path(annotations_csv)
+    out_path = Path(out_csv)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    audit_rows, audit_fields = _read_csv_with_fields(seed_path)
+    gt_by_frame = _load_gt_boxes_by_frame(anno_path)
+    gt_frames = sorted(gt_by_frame)
+
+    output_rows: list[dict[str, Any]] = []
+    positive_rows = 0
+    negative_rows = 0
+    ignored_rows = 0
+
+    for row in audit_rows:
+        frame_id = _int_from_row(row, "frame_id")
+        seed_bbox = _bbox_from_xyxy_fields(row)
+        gt_bbox: BBox | None = None
+        gt_source = "none"
+        if frame_id is not None:
+            gt_bbox, gt_source = _gt_for_frame(
+                gt_by_frame,
+                gt_frames,
+                frame_id,
+                interpolate=interpolate_gt,
+            )
+
+        enriched = dict(row)
+        enriched.update(
+            {
+                "dataset_source": dataset_source,
+                "run_id": run_id,
+                "has_gt": 0,
+                "gt_frame_source": gt_source,
+                "gt_x1": "",
+                "gt_y1": "",
+                "gt_x2": "",
+                "gt_y2": "",
+                "gt_iou": "",
+                "gt_center_distance_px": "",
+                "seed_label": "",
+                "label_reason": "no_gt",
+                "sample_weight": 0.0,
+            }
+        )
+
+        if seed_bbox is None:
+            enriched["label_reason"] = "invalid_bbox"
+            ignored_rows += 1
+            output_rows.append(enriched)
+            continue
+        if gt_bbox is None:
+            ignored_rows += 1
+            output_rows.append(enriched)
+            continue
+
+        gt_iou = _iou(seed_bbox, gt_bbox)
+        gt_center_distance = _center_distance(seed_bbox, gt_bbox)
+        is_positive = gt_iou >= iou_threshold or gt_center_distance <= center_distance_threshold_px
+        if is_positive:
+            positive_rows += 1
+            label_reason = "iou_match" if gt_iou >= iou_threshold else "center_match"
+        else:
+            negative_rows += 1
+            label_reason = "no_match"
+        enriched.update(
+            {
+                "has_gt": 1,
+                "gt_frame_source": gt_source,
+                "gt_x1": gt_bbox[0],
+                "gt_y1": gt_bbox[1],
+                "gt_x2": gt_bbox[2],
+                "gt_y2": gt_bbox[3],
+                "gt_iou": gt_iou,
+                "gt_center_distance_px": gt_center_distance,
+                "seed_label": 1 if is_positive else 0,
+                "label_reason": label_reason,
+                "sample_weight": 1.0,
+            }
+        )
+        output_rows.append(enriched)
+
+    fields = list(audit_fields)
+    for field in SEED_ADMISSION_LABEL_FIELDS:
+        if field not in fields:
+            fields.append(field)
+    _write_csv(out_path, output_rows, fields)
+
+    summary_json = out_path.with_suffix(".summary.json")
+    summary = {
+        "seed_audit_csv": str(seed_path),
+        "annotations_csv": str(anno_path),
+        "output_csv": str(out_path),
+        "summary_json": str(summary_json),
+        "dataset_source": dataset_source,
+        "run_id": run_id,
+        "iou_threshold": iou_threshold,
+        "center_distance_threshold_px": center_distance_threshold_px,
+        "interpolate_gt": bool(interpolate_gt),
+        "total_rows": len(output_rows),
+        "labeled_rows": positive_rows + negative_rows,
+        "positive_rows": positive_rows,
+        "negative_rows": negative_rows,
+        "ignored_rows": ignored_rows,
+    }
+    summary_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    return SeedAdmissionDatasetResult(out_path, summary_json, summary)
 
 
 def _load_rows_by_frame(path: Path) -> dict[int, list[dict[str, Any]]]:
@@ -1160,6 +1423,89 @@ def _remember_global_tracklet_confirmation(
         pending["global_tracklet_confirmed_seen"] = True
 
 
+def _small_global_repeat_guard(
+    item: dict[str, Any] | None,
+    *,
+    frame_id: int,
+    last_small_global_seed: tuple[int, BBox] | None,
+    cooldown_frames: int,
+    max_distance_px: float,
+) -> dict[str, Any]:
+    if (
+        item is None
+        or str(item.get("reacquire_mode", "")) != "global"
+        or not bool(item.get("global_small_area_candidate", False))
+        or cooldown_frames <= 0
+        or last_small_global_seed is None
+    ):
+        return {"active": False, "rejected": False, "since_last_frame": "", "distance_px": ""}
+    last_frame_id, last_bbox = last_small_global_seed
+    since_last_frame = frame_id - last_frame_id
+    distance_px = _center_distance(item["bbox"], last_bbox)
+    active = 0 <= since_last_frame <= cooldown_frames
+    rejected = active and (max_distance_px <= 0 or distance_px > max_distance_px)
+    return {
+        "active": active,
+        "rejected": rejected,
+        "since_last_frame": since_last_frame,
+        "distance_px": distance_px,
+    }
+
+
+def _reacquire_seed_audit_row(
+    frame_id: int,
+    item: dict[str, Any],
+    *,
+    event: str,
+    admitted: bool,
+    guard_reason: str,
+    reacquire_reason: str,
+    last_small_global_seed: tuple[int, BBox] | None,
+    repeat_guard: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    row = item["row"]
+    bbox = item["bbox"]
+    repeat_guard = repeat_guard or _small_global_repeat_guard(
+        item,
+        frame_id=frame_id,
+        last_small_global_seed=last_small_global_seed,
+        cooldown_frames=0,
+        max_distance_px=0.0,
+    )
+    x1, y1, x2, y2 = bbox
+    return {
+        "frame_id": frame_id,
+        "event": event,
+        "admitted": 1 if admitted else 0,
+        "guard_reason": guard_reason,
+        "reacquire_mode": item.get("reacquire_mode", ""),
+        "reacquire_reason": reacquire_reason,
+        "global_small_area_candidate": 1 if bool(item.get("global_small_area_candidate", False)) else 0,
+        "x1": x1,
+        "y1": y1,
+        "x2": x2,
+        "y2": y2,
+        "bbox_area": _box_area(bbox),
+        "selector_score": item.get("selector_score", ""),
+        "detector_score": item.get("detector_score", ""),
+        "motion_consistency": item.get("motion_consistency", ""),
+        "memory_consistency": item.get("memory_consistency", ""),
+        "jump_px": item.get("jump_px", ""),
+        "reacquire_distance_px": item.get("reacquire_distance_px", item.get("jump_px", "")),
+        "appearance_similarity": item.get("appearance_similarity", ""),
+        "crop_drone_score": item.get("crop_drone_score", ""),
+        "tracklet_filter_applied": row.get("tracklet_filter_applied", ""),
+        "tracklet_is_drone": row.get("tracklet_is_drone", ""),
+        "tracklet_classifier_prob": _parse_probability_value(row.get("tracklet_classifier_prob")),
+        "sequence_gate_confirmed": row.get("sequence_gate_confirmed", ""),
+        "sequence_gate_reason": row.get("sequence_gate_reason", ""),
+        "diagnostic_cause": row.get("diagnostic_cause", ""),
+        "small_global_since_last_frame": repeat_guard.get("since_last_frame", ""),
+        "small_global_repeat_distance_px": repeat_guard.get("distance_px", ""),
+        "small_global_repeat_cooldown_active": 1 if bool(repeat_guard.get("active", False)) else 0,
+    }
+
+
 def _extend_memory_probation(current_until: int, frame_id: int, frames: int) -> int:
     if frames <= 0:
         return current_until
@@ -1252,10 +1598,64 @@ def _write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> Non
             writer.writerow({field: _csv_value(row.get(field, "")) for field in fields})
 
 
+def _read_csv_with_fields(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
+    if not path.exists():
+        raise FileNotFoundError(path)
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        return rows, list(reader.fieldnames or [])
+
+
+def _load_gt_boxes_by_frame(path: Path) -> dict[int, BBox]:
+    rows, _ = _read_csv_with_fields(path)
+    gt_by_frame: dict[int, BBox] = {}
+    for row in rows:
+        frame_id = _int_from_row(row, "frame_id")
+        bbox = _bbox_from_xyxy_fields(row)
+        if frame_id is None or bbox is None or frame_id in gt_by_frame:
+            continue
+        gt_by_frame[frame_id] = bbox
+    return gt_by_frame
+
+
+def _gt_for_frame(
+    gt_by_frame: dict[int, BBox],
+    gt_frames: list[int],
+    frame_id: int,
+    *,
+    interpolate: bool,
+) -> tuple[BBox | None, str]:
+    if frame_id in gt_by_frame:
+        return gt_by_frame[frame_id], "exact"
+    if not interpolate or not gt_frames:
+        return None, "none"
+    pos = bisect.bisect_left(gt_frames, frame_id)
+    if pos <= 0 or pos >= len(gt_frames):
+        return None, "none"
+    left_frame = gt_frames[pos - 1]
+    right_frame = gt_frames[pos]
+    span = max(1, right_frame - left_frame)
+    alpha = (frame_id - left_frame) / span
+    left = gt_by_frame[left_frame]
+    right = gt_by_frame[right_frame]
+    return tuple(left[i] + alpha * (right[i] - left[i]) for i in range(4)), "interpolated"  # type: ignore[return-value]
+
+
 def _csv_value(value: Any) -> Any:
     if isinstance(value, float):
         return f"{value:.6f}"
     return value
+
+
+def _int_from_row(row: dict[str, Any], key: str) -> int | None:
+    try:
+        value = row.get(key, "")
+        if value == "":
+            return None
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _detector_score(row: dict[str, Any]) -> float:
@@ -1276,6 +1676,16 @@ def _bbox_from_row(row: dict[str, Any]) -> BBox | None:
     if len(vals) != 4:
         return None
     return tuple(float(v) for v in vals)  # type: ignore[return-value]
+
+
+def _bbox_from_xyxy_fields(row: dict[str, Any]) -> BBox | None:
+    try:
+        bbox = tuple(float(row[key]) for key in ("x1", "y1", "x2", "y2"))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+        return None
+    return bbox  # type: ignore[return-value]
 
 
 def _predict_bbox(memory: list[tuple[int, BBox]], frame_id: int) -> BBox | None:
